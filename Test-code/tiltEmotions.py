@@ -1,154 +1,167 @@
 #!/usr/bin/env python3
-# Task C - tiltEmotions.py
-# Author: <Your Name> (<Student ID>)
-#
-# Requirements covered:
-# - Read pitch/roll/yaw; map orientation to mood zones.
-# - Brief animation when entering a new zone (update only on change -> avoid flicker).
-# - Joystick Middle toggles pause/resume.
-# - Special reaction when a rapid flip (>60° within 0.5s) is detected.
-# - Looks good, uses multiple colours, smooth updates.
+# -*- coding: utf-8 -*-
+"""
+COSC2674/2755 - Task C (2): tiltEmotions.py
+- Reads pitch/roll/yaw to classify orientation into 5 moods + special flip mood
+- Displays brief animated sequence for each mood (updates only on zone change)
+- Detects rapid flipping (|Δroll|>60° within 0.5s) -> special MoodEmo6
+- Joystick middle: pause/resume
 
-import time, math, collections
+Author: <Your Name>, <Your Student ID>
+"""
+
+import time
+from math import fabs
 try:
-    from sense_hat import SenseHat
-except Exception:
-    class SenseHat:
-        def __init__(self):
-            class Stick: ...
-            self.stick = Stick()
-            self.stick.direction_middle = None
-            self.low_light = False
-        def set_pixels(self, px): print("[LED] frame")
-        def clear(self, c=(0,0,0)): pass
-        def get_orientation_degrees(self): return {"pitch":0,"roll":0,"yaw":0}
-        def show_message(self, msg, **kw): print("[LED] msg:", msg)
+    from sense_hat import SenseHat, ACTION_PRESSED
+except ImportError:
+    from sense_emu import SenseHat, ACTION_PRESSED
 
-# colours
-Black  = (0,0,0)
-White  = (255,255,255)
-Green  = (0,255,0)
-Blue   = (0,128,255)
-Red    = (255,0,0)
-Yellow = (255,220,0)
-Orange = (255,140,0)
-Purple = (200,0,255)
-Cyan   = (0,230,230)
+# Reuse simple colour palette
+BLACK = [0,0,0]; FACE=[255,200,0]; EYE=[0,0,0]
+MOUTH=[200,0,0]; TEAR=[64,180,255]; ANGRY=[255,50,10]
+COOL=[120,200,255]; WOW=[255,255,255]; LOVE=[255,0,100]
+BKG=[10,10,20]
 
-def solid(c): return [c]*64
 def put(px,x,y,c):
-    if 0<=x<8 and 0<=y<8: px[y*8+x]=c
+    if 0<=x<8 and 0<=y<8: px[y*8+x]=c[:]
 
-def arrow(direction, fg, bg=Black):
-    px = solid(bg)
-    # simple 8x8 arrows
-    if direction=="up":
-        for i in range(8): put(px,3,7-i,fg); put(px,4,7-i,fg)
-        for dx in (-2,-1,0,1,2): put(px,3+dx,0,fg)
-    elif direction=="down":
-        for i in range(8): put(px,3,i,fg); put(px,4,i,fg)
-        for dx in (-2,-1,0,1,2): put(px,3+dx,7,fg)
-    elif direction=="left":
-        for i in range(8): put(px,7-i,3,fg); put(px,7-i,4,fg)
-        for dy in (-2,-1,0,1,2): put(px,0,3+dy,fg)
-    elif direction=="right":
-        for i in range(8): put(px,i,3,fg); put(px,i,4,fg)
-        for dy in (-2,-1,0,1,2): put(px,7,3+dy,fg)
-    elif direction=="flat":
-        for x in range(1,7): put(px,x,3,fg); put(px,x,4,fg)
-    return px
+def face_base(col=FACE):
+    p=[col[:] for _ in range(64)]
+    for x in range(8):
+        for y in range(8):
+            if x in (0,7) or y in (0,7): put(p,x,y,BKG)
+    return p
 
-def pulse(base_color, steps=5):
+def eyes(p):
+    put(p,2,2,EYE); put(p,5,2,EYE)
+
+def smile(p):
+    put(p,2,5,MOUTH); put(p,5,5,MOUTH); put(p,3,6,MOUTH); put(p,4,6,MOUTH)
+
+def sad(p):
+    put(p,2,6,MOUTH); put(p,5,6,MOUTH); put(p,3,5,MOUTH); put(p,4,5,MOUTH)
+
+def wow(p):
+    put(p,3,5,WOW); put(p,4,5,WOW); put(p,3,6,WOW); put(p,4,6,WOW)
+
+def angry(p):
+    put(p,1,1,ANGRY); put(p,2,1,ANGRY); put(p,5,1,ANGRY); put(p,6,1,ANGRY)
+
+def sunglasses(p):
+    for x in range(1,3): put(p,x,2,COOL)
+    for x in range(5,7): put(p,x,2,COOL)
+    for x in range(2,6): put(p,x,3,COOL)
+
+def heart(p):
+    for (ox) in (1,5):
+        put(p,ox,2,LOVE); put(p,ox+1,2,LOVE); put(p,ox,3,LOVE); put(p,ox+1,3,LOVE)
+
+def build_frames(kind):
+    # five baseline moods + special:
+    # forward=Happy, back=Sad, left=Angry, right=Cool, flat=Surprised, special=Love fireworks
     frames=[]
-    for t in range(steps):
-        k = t/(steps-1)
-        c = (int(base_color[0]*k), int(base_color[1]*k), int(base_color[2]*k))
-        frames.append(solid(c))
+    if kind=="forward":   # Happy (subtle bounce)
+        p1=face_base(); eyes(p1); smile(p1)
+        p2=face_base(); put(p2,2,1,EYE); put(p2,5,1,EYE); smile(p2)
+        frames=[p1,p2,p1]
+    elif kind=="back":    # Sad (teardrop)
+        p1=face_base(); eyes(p1); sad(p1); put(p1,6,4,TEAR)
+        p2=face_base(); eyes(p2); sad(p2); put(p2,6,5,TEAR)
+        p3=face_base(); eyes(p3); sad(p3)
+        frames=[p1,p2,p3]
+    elif kind=="left":    # Angry (flash)
+        p1=face_base(); angry(p1); eyes(p1)
+        p2=[ANGRY[:] for _ in range(64)]
+        p3=face_base(); angry(p3); eyes(p3)
+        frames=[p1,p2,p3]
+    elif kind=="right":   # Cool (tilt glasses)
+        p1=face_base(); sunglasses(p1)
+        p2=face_base(); sunglasses(p2); put(p2,1,4,COOL)
+        frames=[p1,p2,p1]
+    elif kind=="flat":    # Surprised
+        p1=face_base([255,230,120]); put(p1,2,2,WOW); put(p1,5,2,WOW); wow(p1)
+        p2=face_base([255,220,110]); put(p2,2,2,WOW); put(p2,5,2,WOW)
+        frames=[p1,p2,p1]
+    elif kind=="special": # Love fireworks
+        p1=face_base([255,225,150]); heart(p1); smile(p1)
+        p2=face_base([255,210,140]); heart(p2); put(p2,0,0,LOVE); put(p2,7,7,LOVE)
+        p3=face_base([255,200,130]); heart(p3); put(p3,7,0,LOVE); put(p3,0,7,LOVE)
+        frames=[p1,p2,p3,p2]
     return frames
 
 class TiltEmotions:
-    FRAME_SEC   = 0.08
-    FLIP_ANGLE  = 60.0
-    FLIP_WINDOW = 0.5
-
-    ZONES = [
-        ("Forward", "up",    Green),
-        ("Back",    "down",  Blue),
-        ("Left",    "left",  Orange),
-        ("Right",   "right", Red),
-        ("Flat",    "flat",  Yellow),
-        ("Diagonal","right", Purple),  # catch-all
-    ]
-
     def __init__(self):
         self.sense = SenseHat()
+        self.sense.clear()
         self.paused = False
-        self.last_zone = None
-        self.accel_hist = collections.deque(maxlen=60)  # (t, pitch)
-        try:
-            self.sense.stick.direction_middle = self.on_middle
-        except Exception:
-            pass
+        self.zone = None
+        self.last_roll = None
+        self.last_roll_ts = None
 
-    def on_middle(self, event=None):
-        self.paused = not self.paused
-        self.sense.show_message("PAUSE" if self.paused else "PLAY", scroll_speed=0.05)
+        self.sense.stick.direction_middle = self._on_joy
 
-    # zone mapping from pitch/roll
-    def zone_from_orientation(self, pitch, roll):
-        # normalize to -180..+180
-        p = ((pitch+180)%360)-180
-        r = ((roll+180)%360)-180
-        ap, ar = abs(p), abs(r)
-        if ap > 30 and ap >= ar and p > 0:   return 0  # Forward
-        if ap > 30 and ap >= ar and p < 0:   return 1  # Back
-        if ar > 30 and ar >  ap and r > 0:   return 2  # Left
-        if ar > 30 and ar >  ap and r < 0:   return 3  # Right
-        if ap < 15 and ar < 15:              return 4  # Flat
-        return 5  # Diagonal / otherwise
+    def _on_joy(self, event):
+        if event.action == ACTION_PRESSED:
+            self.paused = not self.paused
 
-    def special_flip_triggered(self, pitch):
-        now = time.time()
-        self.accel_hist.append((now, pitch))
-        earliest = now - self.FLIP_WINDOW
-        recent = [p for (t,p) in self.accel_hist if t >= earliest]
-        if len(recent) >= 2 and (max(recent)-min(recent)) > self.FLIP_ANGLE:
-            return True
-        return False
+    def _read_orientation(self):
+        o = self.sense.get_orientation_degrees()
+        # normalize to [-180,180] for roll
+        pitch = o["pitch"]
+        roll = o["roll"]
+        yaw = o["yaw"]
+        return pitch, roll, yaw
 
-    def play_zone_animation(self, zone_idx):
-        name, arrow_dir, color = self.ZONES[zone_idx]
-        # brief, distinct animation: pulse + arrow
-        for f in pulse(color, steps=5):
+    def _zone_from_angles(self, pitch, roll):
+        # deadband ±15 for flat; threshold 20deg for tilts
+        if abs(pitch) < 15 and abs((roll if roll<=180 else roll-360)) < 15:
+            return "flat"
+        if pitch > 20:
+            return "forward"
+        if pitch < -20:
+            return "back"
+        # Convert roll to signed
+        r = roll if roll <= 180 else roll - 360
+        if r > 20:
+            return "right"
+        if r < -20:
+            return "left"
+        return "flat"
+
+    def _rapid_flip(self, roll):
+        now = time.monotonic()
+        r = roll if roll <= 180 else roll - 360
+        if self.last_roll is None:
+            self.last_roll, self.last_roll_ts = r, now
+            return False
+        dt = now - self.last_roll_ts
+        dr = abs(r - self.last_roll)
+        self.last_roll, self.last_roll_ts = r, now
+        return (dr > 60.0) and (dt <= 0.5)
+
+    def show_sequence(self, frames, fps=6):
+        for f in frames:
             self.sense.set_pixels(f)
-            time.sleep(0.04)
-        self.sense.set_pixels(arrow(arrow_dir, color))
-
-    def special_reaction(self):
-        # bright white flash x3
-        for _ in range(3):
-            self.sense.set_pixels(solid(White)); time.sleep(0.05)
-            self.sense.clear(); time.sleep(0.03)
+            time.sleep(1.0 / fps)
 
     def run(self):
-        self.sense.show_message("Task C: tiltEmotions", scroll_speed=0.05)
         try:
             while True:
-                o = self.sense.get_orientation_degrees()
-                pitch = float(o.get("pitch", 0.0))
-                roll  = float(o.get("roll", 0.0))
+                pitch, roll, yaw = self._read_orientation()
+                if self._rapid_flip(roll):
+                    if not self.paused:
+                        self.show_sequence(build_frames("special"))
+                    continue
 
-                if self.special_flip_triggered(pitch):
-                    self.special_reaction()
-
-                if not self.paused:
-                    z = self.zone_from_orientation(pitch, roll)
-                    if z != self.last_zone:
-                        self.last_zone = z
-                        self.play_zone_animation(z)
-
-                # hold current frame (no redraws -> no flicker)
-                time.sleep(self.FRAME_SEC)
+                z = self._zone_from_angles(pitch, roll)
+                if z != self.zone:
+                    self.zone = z
+                    if not self.paused:
+                        self.show_sequence(build_frames(z), fps=5)
+                else:
+                    # keep screen steady to avoid flicker
+                    time.sleep(0.05)
         except KeyboardInterrupt:
             pass
         finally:

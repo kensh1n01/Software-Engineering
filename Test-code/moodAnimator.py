@@ -1,276 +1,355 @@
 #!/usr/bin/env python3
-# Task C - moodAnimator.py
-# Author: <Your Name> (<Student ID>)
-#
-# Requirements covered:
-# - Six animated emojis (≥3 frames each), each frame uses ≥3 colours (including background).
-# - Joystick controls:
-#     Right  -> next emoji
-#     Left   -> previous emoji
-#     Middle -> pause/resume animation
-# - After 20s without input: dim/sleep; any joystick input wakes and resumes.
-# - Smooth animation, no flicker (single set_pixels per frame).
-#
-# Tested to run on Raspberry Pi with Sense HAT. Includes a tiny stub so file won't crash on non-Pi.
+# -*- coding: utf-8 -*-
+"""
+COSC2674/2755 - Task C (1): moodAnimator.py
+- Six original animated emoji faces (≥3 frames each, ≥3 colours per frame)
+- Joystick control: Right=next, Left=prev, Middle=pause/resume
+- Idle timeout (20s): dim LEDs and show sleeping neutral face; wake on any input
+- Object-oriented, non-blocking event handling
 
-import time, math, threading
-from datetime import datetime
+Author: <Your Name>, <Your Student ID>
+"""
 
-# ---------- Sense HAT import with safe fallback ----------
+import time
+import threading
+from collections import deque
+
+# Sense HAT import (supports emulator fallback when developing off-device)
 try:
-    from sense_hat import SenseHat
-except Exception:
-    class SenseHat:  # minimal stub for local dev (no LEDs)
-        def __init__(self):
-            class Stick: ...
-            self.stick = Stick()
-            self.stick.direction_right = None
-            self.stick.direction_left = None
-            self.stick.direction_middle = None
-            self.low_light = False
-        def set_pixels(self, px): print("[LED] frame")
-        def show_message(self, msg, **kw): print("[LED] msg:", msg)
-        def clear(self, c=(0,0,0)): pass
+    from sense_hat import SenseHat, ACTION_PRESSED
+except ImportError:  # Optional emulator support if you test on a laptop
+    from sense_emu import SenseHat, ACTION_PRESSED
 
-# ---------- Colour palette ----------
-Black    = (0, 0, 0)
-White    = (255, 255, 255)
-Red      = (255, 0, 0)
-Green    = (0, 255, 0)
-Blue     = (0, 128, 255)
-Yellow   = (255, 220, 0)
-Orange   = (255, 140, 0)
-Purple   = (200, 0, 255)
-Cyan     = (0, 230, 230)
-Pink     = (255, 120, 200)
-Teal     = (0, 160, 160)
-DarkGreen= (5, 30, 5)
+# ------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------
+def clamp(v, lo, hi):
+    return max(lo, min(hi, v))
 
-# ---------- tiny 8x8 helpers ----------
-def solid(color):
-    return [color]*64
+# Basic colours (at least three per frame will be used)
+BLACK = [0, 0, 0]
+DIM = [5, 5, 5]
+FACE = [255, 200, 0]      # yellow face
+EYE = [0, 0, 0]           # black eyes
+MOUTH = [200, 0, 0]       # red mouth
+BLUSH = [255, 105, 97]    # coral
+TEAR = [64, 180, 255]     # blue tear
+ANGRY = [255, 50, 10]     # angry brow
+COOL = [120, 200, 255]    # cyan sunglasses
+LOVE = [255, 0, 100]      # pink heart
+WOW = [255, 255, 255]     # white highlight
+BKG = [10, 10, 20]        # subtle background
 
-def put(px, x, y, c):
+def blank():
+    return [BLACK[:] for _ in range(64)]
+
+def put(px, x, y, color):
     if 0 <= x < 8 and 0 <= y < 8:
-        px[y*8 + x] = c
+        px[y*8 + x] = color[:]
 
-def eyes(px, color=Yellow, style="open"):
-    if style == "open":
-        for x in (2,5):
-            put(px, x, 2, color); put(px, x, 3, color)
-    elif style == "blink":
-        for x in (2,5):
-            put(px, x, 3, color)
-    elif style == "wink_left":
-        put(px, 2, 3, color)  # left eye closed
-        put(px, 5, 2, color); put(px, 5, 3, color)  # right open
-    return px
+def circle_face(base_color=FACE):
+    p = [base_color[:] for _ in range(64)]
+    # vignette border
+    for x in range(8):
+        for y in range(8):
+            if x in (0,7) or y in (0,7):
+                put(p, x, y, BKG)
+    return p
 
-def mouth_line(px, y, x0, x1, color):
-    for x in range(x0, x1+1):
-        put(px, x, y, color)
+def eyes(p, x1, x2, y=2, eye_color=EYE):
+    put(p, x1, y, eye_color)
+    put(p, x2, y, eye_color)
 
-def smile(px, color=Green):
-    mouth_line(px, 5, 1, 6, color)
-    put(px, 2, 4, color); put(px, 5, 4, color)
-    return px
+def mouth_line(p, y, x1=2, x2=5, color=MOUTH):
+    for x in range(x1, x2+1):
+        put(p, x, y, color)
 
-def frown(px, color=Blue):
-    mouth_line(px, 6, 1, 6, color)
-    put(px, 1, 6, color); put(px, 6, 6, color)
-    return px
+def mouth_arc_smile(p, color=MOUTH):
+    put(p, 2, 5, color); put(p, 5, 5, color)
+    for x in range(3,5):
+        put(p, x, 6, color)
 
-def o_mouth(px, color=White):
-    for y in (4,5):
-        for x in (3,4):
-            put(px, x, y, color)
-    return px
+def mouth_arc_sad(p, color=MOUTH):
+    put(p, 2, 6, color); put(p, 5, 6, color)
+    for x in range(3,5):
+        put(p, x, 5, color)
 
-def heart(px, color=Pink):
-    # tiny heart at bottom center
-    for (x,y) in [(3,6),(4,6),(2,5),(5,5),(3,4),(4,4)]:
-        put(px, x, y, color)
-    return px
+def blush(p):
+    put(p, 1, 3, BLUSH); put(p, 6, 3, BLUSH)
 
-def ring(color, bg=Black, r=3.0):
-    out = [bg]*64
-    for y in range(8):
-        for x in range(8):
-            dx, dy = x-3.5, y-3.5
-            d = math.sqrt(dx*dx+dy*dy)
-            if abs(d-r) < 0.6:
-                put(out, x, y, color)
-    return out
+def tear(p):
+    put(p, 6, 3, TEAR); put(p, 6, 4, TEAR)
 
-def mix(c1, c2, t):
-    return tuple(int(c1[i]*(1-t)+c2[i]*t) for i in range(3))
+def angry_brows(p):
+    put(p, 1, 1, ANGRY); put(p, 2, 1, ANGRY)
+    put(p, 5, 1, ANGRY); put(p, 6, 1, ANGRY)
 
-# ---------- emoji frame factories (each returns ≥3 frames, ≥3 colours) ----------
-def emoji_happy():
-    # Colours: Green, Yellow, White, Black
-    frames = []
-    # frame 1: open eyes + smile
-    px = solid(Black); eyes(px, Yellow, "open"); smile(px, Green)
-    frames.append(px)
-    # frame 2: ring sparkle
-    frames.append(ring(mix(Green, Yellow, 0.3), r=2.0))
-    # frame 3: wide smile with tooth (white)
-    px = solid(Black); eyes(px, Yellow, "open"); smile(px, Green); mouth_line(px, 5, 3, 4, White)
-    frames.append(px)
-    # frame 4: blink
-    px = solid(Black); eyes(px, Yellow, "blink"); smile(px, Green)
-    frames.append(px)
-    return frames
+def sunglasses(p):
+    for x in range(1,3): put(p, x, 2, COOL)
+    for x in range(5,7): put(p, x, 2, COOL)
+    for x in range(2,5): put(p, x, 3, COOL)
 
-def emoji_sad():
-    # Colours: Blue, Cyan, White, Black
-    frames = []
-    px = solid(Black); eyes(px, White, "open"); frown(px, Blue)
-    frames.append(px)
-    # tear drop
-    px = solid(Black); eyes(px, White, "open"); frown(px, Blue); put(px, 5, 4, Cyan)
-    frames.append(px)
-    # deeper frown
-    px = solid(Black); eyes(px, White, "blink"); frown(px, mix(Blue, Cyan, 0.4))
-    frames.append(px)
-    return frames
+def heart_eyes(p):
+    # two small hearts as eyes
+    for (ox) in (1,5):
+        put(p, ox, 2, LOVE); put(p, ox+1, 2, LOVE)
+        put(p, ox, 3, LOVE); put(p, ox+1, 3, LOVE)
+        put(p, ox, 1, LOVE)
 
-def emoji_angry():
-    # Colours: Red, Orange, Yellow, Black
-    frames = []
-    px = solid(Black)
-    # brows
-    put(px,1,1,Red); put(px,2,1,Red); put(px,5,1,Red); put(px,6,1,Red)
-    eyes(px, Yellow, "open"); frown(px, Red)
-    frames.append(px)
-    # fiery ring
-    frames.append(ring(Orange, r=3.0))
-    # intense face
-    px = solid(Black)
-    put(px,1,1,Orange); put(px,2,1,Orange); put(px,5,1,Orange); put(px,6,1,Orange)
-    eyes(px, Yellow, "blink"); frown(px, mix(Red, Orange, 0.5))
-    frames.append(px)
-    return frames
+def wow_mouth(p):
+    put(p, 3, 5, WOW); put(p, 4, 5, WOW)
+    put(p, 3, 6, WOW); put(p, 4, 6, WOW)
 
-def emoji_calm():
-    # Colours: Teal, Yellow, DarkGreen, Black
-    frames = []
-    frames.append(solid(DarkGreen))
-    px = solid(Black); eyes(px, Yellow, "open"); mouth_line(px, 5, 2, 5, Teal)
-    frames.append(px)
-    px = solid(Black); eyes(px, Yellow, "blink"); mouth_line(px, 5, 3, 4, Teal)
-    frames.append(px)
-    return frames
+# ------------------------------------------------------------
+# Emoji classes
+# ------------------------------------------------------------
+class AnimatedEmoji:
+    """Base class for a multi-frame emoji animation."""
+    name = "Base"
 
-def emoji_surprised():
-    # Colours: Yellow, White, Cyan, Black
-    frames = []
-    px = solid(Black); eyes(px, Yellow, "open"); o_mouth(px, White)
-    frames.append(px)
-    frames.append(ring(Cyan, r=2.0))
-    px = solid(Black); eyes(px, Yellow, "blink"); o_mouth(px, mix(White, Cyan, 0.5))
-    frames.append(px)
-    return frames
+    def frames(self):
+        """Return list[ list[RGB]*64 ] of frames."""
+        return []
 
-def emoji_love():
-    # Colours: Pink, White, Yellow, Black
-    frames = []
-    px = solid(Black); eyes(px, Yellow, "wink_left"); smile(px, Pink); heart(px, Pink)
-    frames.append(px)
-    frames.append(ring(Pink, r=1.8))
-    px = solid(Black); eyes(px, Yellow, "open"); smile(px, mix(Pink, White, 0.4)); heart(px, mix(Pink, Yellow, 0.3))
-    frames.append(px)
-    return frames
+    def fps(self):
+        return 4  # default 4 FPS
 
-EMOTIONS = [
-    ("Happy",     emoji_happy()),
-    ("Sad",       emoji_sad()),
-    ("Angry",     emoji_angry()),
-    ("Calm",      emoji_calm()),
-    ("Surprised", emoji_surprised()),
-    ("Love",      emoji_love()),
-]
-EMO_NAMES = [n for n,_ in EMOTIONS]
 
-# ---------- app ----------
+class HappyEmoji(AnimatedEmoji):
+    name = "Happy"
+    def frames(self):
+        F = []
+        # Frame 1: smile + blush
+        p1 = circle_face()
+        eyes(p1, 2, 5); blush(p1); mouth_arc_smile(p1)
+        F.append(p1)
+        # Frame 2: wink left
+        p2 = circle_face()
+        put(p2, 2, 2, MOUTH)  # wink line
+        put(p2, 5, 2, EYE)
+        mouth_arc_smile(p2); blush(p2)
+        F.append(p2)
+        # Frame 3: big smile
+        p3 = circle_face()
+        eyes(p3, 2, 5); blush(p3)
+        for y in (5,6):
+            mouth_line(p3, y, 2, 5)
+        F.append(p3)
+        return F
+
+class SadEmoji(AnimatedEmoji):
+    name = "Sad"
+    def frames(self):
+        F=[]
+        # Frame 1: sad arc + tear start
+        p1 = circle_face()
+        eyes(p1, 2, 5); mouth_arc_sad(p1); tear(p1)
+        F.append(p1)
+        # Frame 2: tear lower
+        p2 = circle_face()
+        eyes(p2, 2, 5); mouth_arc_sad(p2)
+        put(p2, 6, 4, TEAR); put(p2, 6, 5, TEAR)
+        F.append(p2)
+        # Frame 3: double tear
+        p3 = circle_face()
+        eyes(p3, 2, 5); mouth_arc_sad(p3)
+        put(p3, 1, 4, TEAR); put(p3, 1, 5, TEAR)
+        put(p3, 6, 4, TEAR); put(p3, 6, 5, TEAR)
+        F.append(p3)
+        return F
+
+class AngryEmoji(AnimatedEmoji):
+    name = "Angry"
+    def frames(self):
+        F=[]
+        # Frame 1: brows down
+        p1 = circle_face()
+        angry_brows(p1); eyes(p1, 2, 5); mouth_line(p1, 6, 2, 5, MOUTH)
+        F.append(p1)
+        # Frame 2: mouth open
+        p2 = circle_face()
+        angry_brows(p2); eyes(p2, 2, 5); mouth_line(p2, 5, 2, 5, ANGRY)
+        F.append(p2)
+        # Frame 3: red flash
+        p3 = [ANGRY[:] for _ in range(64)]
+        F.append(p3)
+        return F
+    def fps(self): return 6
+
+class SurprisedEmoji(AnimatedEmoji):
+    name = "Surprised"
+    def frames(self):
+        F=[]
+        # Frame 1: wow eyes + round mouth
+        p1 = circle_face()
+        eyes(p1, 2, 2, 2, WOW); eyes(p1, 5, 5, 2, WOW)  # overwrite via helper misuse
+        wow_mouth(p1)
+        F.append(p1)
+        # Frame 2: blink
+        p2 = circle_face()
+        put(p2, 2, 2, WOW); put(p2, 5, 2, WOW)
+        put(p2, 3, 6, WOW); put(p2, 4, 6, WOW)
+        F.append(p2)
+        # Frame 3: glow
+        p3 = circle_face([255,230,120])
+        put(p3, 2, 2, WOW); put(p3, 5, 2, WOW)
+        wow_mouth(p3)
+        F.append(p3)
+        return F
+
+class CoolEmoji(AnimatedEmoji):
+    name = "Cool"
+    def frames(self):
+        F=[]
+        # Frame 1: sunglasses, smirk
+        p1 = circle_face()
+        sunglasses(p1); mouth_line(p1, 6, 3, 5, MOUTH)
+        F.append(p1)
+        # Frame 2: tilt shades
+        p2 = circle_face()
+        sunglasses(p2); put(p2, 1, 3, COOL)  # little motion
+        mouth_line(p2, 6, 2, 4, MOUTH)
+        F.append(p2)
+        # Frame 3: sparkle
+        p3 = circle_face()
+        sunglasses(p3); mouth_line(p3, 6, 3, 5, [255, 80, 80])
+        put(p3, 7, 0, WOW)
+        F.append(p3)
+        return F
+
+class LoveEmoji(AnimatedEmoji):
+    name = "Love"
+    def frames(self):
+        F=[]
+        p1 = circle_face([255, 225, 150]); heart_eyes(p1); mouth_arc_smile(p1)
+        F.append(p1)
+        p2 = circle_face([255, 210, 130]); heart_eyes(p2); mouth_arc_smile(p2); put(p2, 0, 7, LOVE)
+        F.append(p2)
+        p3 = circle_face([255, 200, 120]); heart_eyes(p3); mouth_arc_smile(p3); put(p3, 7, 0, LOVE)
+        F.append(p3)
+        return F
+
+class SleepFace(AnimatedEmoji):
+    """Used for idle 'sleep mode'"""
+    name = "Sleep"
+    def frames(self):
+        F=[]
+        p = circle_face([180, 180, 190])
+        # closed eyes
+        put(p, 2, 2, DIM); put(p, 3, 2, DIM)
+        put(p, 4, 2, DIM); put(p, 5, 2, DIM)
+        mouth_line(p, 5, 3, 4, DIM)
+        # tiny 'Z' in corner
+        put(p, 6, 0, DIM); put(p, 7, 0, DIM); put(p, 6, 1, DIM); put(p, 7, 1, DIM)
+        F += [p, p]  # two frames to satisfy multi-frame API
+        return F
+    def fps(self): return 2
+
+# ------------------------------------------------------------
+# Animator Controller
+# ------------------------------------------------------------
 class MoodAnimator:
-    FRAME_SEC    = 0.25
-    SLEEP_AFTER  = 20.0
+    IDLE_TIMEOUT = 20.0  # seconds
 
     def __init__(self):
         self.sense = SenseHat()
+        self.sense.clear()
         self.sense.low_light = False
+
+        self.emojis = [
+            HappyEmoji(), SadEmoji(), AngryEmoji(),
+            SurprisedEmoji(), CoolEmoji(), LoveEmoji()
+        ]
         self.index = 0
-        self.frame_i = 0
         self.paused = False
         self.sleeping = False
-        self.last_input = time.time()
+        self.last_input_ts = time.monotonic()
 
-        # joystick mapping
+        # event queue for joystick
+        self.events = deque()
+        self._register_joystick()
+
+        # worker thread
+        self._stop = False
+        self.worker = threading.Thread(target=self._run_loop, daemon=True)
+
+    def _register_joystick(self):
+        def on_event(event):
+            if event.action != ACTION_PRESSED:
+                return
+            self.events.append(event.direction)
+            self.last_input_ts = time.monotonic()
+
+        self.sense.stick.direction_left = on_event
+        self.sense.stick.direction_right = on_event
+        self.sense.stick.direction_middle = on_event
+
+    def start(self):
+        self.worker.start()
         try:
-            self.sense.stick.direction_right  = self.on_right
-            self.sense.stick.direction_left   = self.on_left
-            self.sense.stick.direction_middle = self.on_middle
-        except Exception:
-            pass
-
-    # ----- joystick handlers -----
-    def touch(self):
-        self.last_input = time.time()
-        if self.sleeping:
-            self.sleeping = False
-            self.sense.low_light = False
-            self.sense.show_message("WAKE", scroll_speed=0.05)
-
-    def on_right(self, event=None):
-        self.touch()
-        self.index = (self.index + 1) % len(EMOTIONS)
-        self.frame_i = 0
-        self.sense.show_message(EMO_NAMES[self.index], scroll_speed=0.05)
-
-    def on_left(self, event=None):
-        self.touch()
-        self.index = (self.index - 1) % len(EMOTIONS)
-        self.frame_i = 0
-        self.sense.show_message(EMO_NAMES[self.index], scroll_speed=0.05)
-
-    def on_middle(self, event=None):
-        self.touch()
-        self.paused = not self.paused
-        self.sense.show_message("PAUSE" if self.paused else "PLAY", scroll_speed=0.05)
-
-    # ----- main loop -----
-    def run(self):
-        self.sense.show_message("Task C: moodAnimator", scroll_speed=0.05)
-        try:
-            while True:
-                now = time.time()
-
-                # Sleep handling
-                if (now - self.last_input) > self.SLEEP_AFTER:
-                    if not self.sleeping:
-                        self.sleeping = True
-                        self.sense.low_light = True
-                        self.sense.clear()
-                    time.sleep(0.1)
-                    continue
-                else:
-                    self.sense.low_light = False
-
-                # Draw current frame (no flicker: single set_pixels)
-                name, frames = EMOTIONS[self.index]
-                frame = frames[self.frame_i % len(frames)]
-                self.sense.set_pixels(frame)
-
-                # Advance animation if not paused
-                if not self.paused:
-                    self.frame_i += 1
-
-                time.sleep(self.FRAME_SEC)
+            while self.worker.is_alive():
+                time.sleep(0.1)
         except KeyboardInterrupt:
             pass
         finally:
-            self.sense.clear()
+            self.shutdown()
+
+    def shutdown(self):
+        self._stop = True
+        self.sense.clear()
+
+    def _handle_events(self):
+        woke = False
+        while self.events:
+            d = self.events.popleft()
+            if self.sleeping:
+                self.wake()
+                woke = True
+                # continue to consume but first wake; next events can act
+            if d == "left":
+                self.index = (self.index - 1) % len(self.emojis)
+                self.paused = False
+            elif d == "right":
+                self.index = (self.index + 1) % len(self.emojis)
+                self.paused = False
+            elif d == "middle":
+                self.paused = not self.paused
+        return woke
+
+    def sleep_if_idle(self):
+        if self.sleeping:
+            return
+        if (time.monotonic() - self.last_input_ts) >= self.IDLE_TIMEOUT:
+            self.sleep()
+
+    def sleep(self):
+        self.sleeping = True
+        self.sense.low_light = True
+        for frame in SleepFace().frames():
+            self.sense.set_pixels(frame)
+        # keep last sleep frame displayed
+
+    def wake(self):
+        self.sleeping = False
+        self.sense.low_light = False
+
+    def _run_loop(self):
+        frame_i = 0
+        while not self._stop:
+            self._handle_events()
+            self.sleep_if_idle()
+
+            if not self.sleeping and not self.paused:
+                emo = self.emojis[self.index]
+                frames = emo.frames()
+                if not frames:
+                    frames = [blank()]
+                frame = frames[frame_i % len(frames)]
+                self.sense.set_pixels(frame)
+                frame_i += 1
+                time.sleep(1.0 / clamp(emo.fps(), 1, 12))
+            else:
+                time.sleep(0.05)
 
 if __name__ == "__main__":
-    MoodAnimator().run()
+    MoodAnimator().start()
