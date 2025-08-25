@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-COSC2674/2755 - Task C (2): tiltEmotions.py
-- Reads pitch/roll/yaw to classify orientation into 5 moods + special flip mood
-- Displays brief animated sequence for each mood (updates only on zone change)
-- Detects rapid flipping (|Δroll|>60° within 0.5s) -> special MoodEmo6
-- Joystick middle: pause/resume
-
-Author: <Your Name>, <Your Student ID>
-"""
 
 import time
 from math import fabs

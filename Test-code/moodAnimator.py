@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-COSC2674/2755 - Task C (1): moodAnimator.py
-- Six original animated emoji faces (≥3 frames each, ≥3 colours per frame)
-- Joystick control: Right=next, Left=prev, Middle=pause/resume
-- Idle timeout (20s): dim LEDs and show sleeping neutral face; wake on any input
-- Object-oriented, non-blocking event handling
-
-Author: <Your Name>, <Your Student ID>
-"""
 
 import time
 import threading
@@ -20,9 +10,7 @@ try:
 except ImportError:  # Optional emulator support if you test on a laptop
     from sense_emu import SenseHat, ACTION_PRESSED
 
-# ------------------------------------------------------------
 # Utilities
-# ------------------------------------------------------------
 def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
@@ -100,9 +88,7 @@ def wow_mouth(p):
     put(p, 3, 5, WOW); put(p, 4, 5, WOW)
     put(p, 3, 6, WOW); put(p, 4, 6, WOW)
 
-# ------------------------------------------------------------
 # Emoji classes
-# ------------------------------------------------------------
 class AnimatedEmoji:
     """Base class for a multi-frame emoji animation."""
     name = "Base"
@@ -245,9 +231,7 @@ class SleepFace(AnimatedEmoji):
         return F
     def fps(self): return 2
 
-# ------------------------------------------------------------
 # Animator Controller
-# ------------------------------------------------------------
 class MoodAnimator:
     IDLE_TIMEOUT = 20.0  # seconds
 
